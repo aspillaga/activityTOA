@@ -50,11 +50,9 @@ TOA differences occur on the **millisecond scale**, so detection timestamps must
 The package can be directly installed from GitHub using the `devtools` package:
 
 ```{r install, eval=FALSE}
-# Install from GitHub (repository URL will be  updated upon manuscript acceptance)
-# devtools::install_github("XXXXX/activityTOA") 
+# Install from GitHub
+# devtools::install_github("aspillaga/activityTOA") 
 
-# Alternative method: Install from local source package
-install.packages("activityTOA_1.0.tar.gz", repos = NULL, type = "source")
 ```
 
 
