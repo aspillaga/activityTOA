@@ -28,7 +28,7 @@ knitr::opts_chunk$set(
 
 This vignette provides a step-by-step guide to applying the **Time-of-Arrival (TOA)**-based method for estimating fish activity from **single receiver-transmitter acoustic telemetry setups**. This method enables the estimation of the relative distance between a tagged fish and a fixed receiver based on the TOA of acoustic signals, as more distant signals take longer to reach the receiver. These variations in TOAs can be used to derive **movement metrics** such as **step lengths**, which can then be modelled using **Hidden Markov Models (HMMs)** or other statistical approaches to classify behavioural states (e.g., "resting" vs "active").
 
-This vignette accompanies the manuscript **Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups**, which is under review in *Methods in Ecology and Evolution*. It provides practical guidance and reproducible code to implement the method described in the manuscript. All the functions needed are provided in the `activityTOA` package for `R`. The package also includes an example acoustic telemetry dataset that will be used throughout this vignette to illustrate the method.
+This vignette accompanies the manuscript **Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups**, published in *Methods in Ecology and Evolution*. It provides practical guidance and reproducible code to implement the method described in the manuscript. All the functions needed are provided in the `activityTOA` package for `R`. The package also includes an example acoustic telemetry dataset that will be used throughout this vignette to illustrate the method.
 
 
 ## Prior considerations
@@ -52,7 +52,6 @@ The package can be directly installed from GitHub using the `devtools` package:
 ```{r install, eval=FALSE}
 # Install from GitHub
 # devtools::install_github("aspillaga/activityTOA") 
-
 ```
 
 
