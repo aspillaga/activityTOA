@@ -5,7 +5,7 @@ for estimating animal activity from **single-receiver acoustic telemetry setups*
 
 The package accompanies the paper:  
 
-**Aspillaga, E. et al. (2025).** Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups. *Methods in Ecology and Evolution*.
+**Aspillaga, E. et al. (2025).** Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups. *Methods in Ecology and Evolution*. Accepted.
 
 ---
 
@@ -37,8 +37,9 @@ library(activityTOA)
 
 If you use this package, please cite the accompanying article:
 
-If you use this package, please cite the accompanying article:  
-
-> Aspillaga, E. et al. (2025). Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups. *Methods in Ecology and Evolution.* Accepted.  
+> Aspillaga, E.; Alós, J.; Catalán, I.A.; Moltó, V.; Abad-Platas, J.; 
+Villegas-Ríos, D. (2025). Inferring activity patterns of aquatic animals from 
+single-receiver acoustic telemetry setups. *Methods in Ecology and Evolution.* 
+Accepted in September 2025.  
 
 
