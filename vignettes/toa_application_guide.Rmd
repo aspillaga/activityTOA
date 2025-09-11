@@ -51,7 +51,7 @@ The package can be directly installed from GitHub using the `devtools` package:
 
 ```{r install, eval=FALSE}
 # Install from GitHub
-# devtools::install_github("aspillaga/activityTOA") 
+# devtools::install_github("aspillaga/activityTOA", build_vignettes = TRUE) 
 ```
 
 
