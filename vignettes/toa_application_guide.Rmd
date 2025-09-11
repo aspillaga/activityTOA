@@ -1,0 +1,589 @@
+---
+title: "Guide to the TOA-based activity estimation method"
+date: "July 22, 2025"
+output: 
+  html_vignette:
+    highlight: tango
+    toc: true
+    number_sections: true
+    fig_width: 8
+    fig_height: 6.3
+fontsize: 11pt
+vignette: >
+  %\VignetteIndexEntry{Guide to the TOA-based activity estimation method}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# Introduction
+
+This vignette provides a step-by-step guide to applying the **Time-of-Arrival (TOA)**-based method for estimating fish activity from **single receiver-transmitter acoustic telemetry setups**. This method enables the estimation of the relative distance between a tagged fish and a fixed receiver based on the TOA of acoustic signals, as more distant signals take longer to reach the receiver. These variations in TOAs can be used to derive **movement metrics** such as **step lengths**, which can then be modelled using **Hidden Markov Models (HMMs)** or other statistical approaches to classify behavioural states (e.g., "resting" vs "active").
+
+This vignette accompanies the manuscript **Inferring activity patterns of aquatic animals from single-receiver acoustic telemetry setups**, which is under review in *Methods in Ecology and Evolution*. It provides practical guidance and reproducible code to implement the method described in the manuscript. All the functions needed are provided in the `activityTOA` package for `R`. The package also includes an example acoustic telemetry dataset that will be used throughout this vignette to illustrate the method.
+
+
+## Prior considerations
+
+Before applying the TOA-based method, the following technical conditions must be met:
+
+1. **Known signal granularity:** 
+The transmitters must emit acoustic signals at random intervals with a **known granularity**. Granularity refers to the smallest time unit by which signal intervals vary. This constraint reduces uncertainty in signal timing and is essential for TOA estimation. If transmitters emit signals at entirely random intervals (i.e., without granularity), this method cannot be applied. To our knowledge, *Thelma Biotel* transmitters operate at a 1-second granularity, while *Lotek* transmitters operate at a 0.5-second granularity. *Innovasea* transmitters emit signals at random intervals without a defined granularity and are therefore **not compatible** with this method.
+
+2. **Deployment segmentation:**
+The method accounts for clock drift between transmitter and receiver. **Any clock reset on the receiver introduces a new drift condition**; therefore, the data must be separated into "deployments", defined as continuous recording periods between clock resets. For example, if a receiver is retrieved, downloaded, reset, and re-deployed, it results in two distinct deployments, even if it is placed at the same location. Be aware that **deployment information is often omitted** when telemetry datasets are merged. It is essential to reconstruct deployment boundaries using receiver installation and retrieval dates recorded in log sheets.
+
+3. **Millisecond timestamp resolution:** 
+TOA differences occur on the **millisecond scale**, so detection timestamps must include **millisecond precision**. Most modern receivers support this, but some older models only report seconds, which is insufficient for this method.
+
+
+## Package installation
+
+The package can be directly installed from GitHub using the `devtools` package:
+
+```{r install, eval=FALSE}
+# Install from GitHub (repository URL will be  updated upon manuscript acceptance)
+# devtools::install_github("XXXXX/activityTOA") 
+
+# Alternative method: Install from local source package
+install.packages("activityTOA_1.0.tar.gz", repos = NULL, type = "source")
+```
+
+
+## Example dataset
+
+An example acoustic telemetry dataset is provided  with the package and can be loaded as follows:
+
+```{r dataset, message=FALSE}
+library(activityTOA)
+
+# Set global options to show three millisecond digits
+options(digits.secs = 3)
+
+data(fish_data)
+names(fish_data)
+```
+
+The `fish_data` object is a list containing four `data.tables`:
+- `detection_data`: Acoustic detection data
+- `sensor_data`: Environmental data recorded by receivers
+- `tag_metadata`: Metadata on fish and transmitters
+- `deployment_metadata`: Metadata on receiver deployments
+
+The `detection_data` table includes:
+- `date_time`: Timestamps of detection (with millisecond resolution)
+- `deployment_id`: Unique identifier for each deployment (continuous clock periods)
+- `station`: Station name, code for the location of the receiver.
+- `receiver_id`: Unique ID of the receiver
+- `tag_id`: Transmitter ID
+- `fish_id`: Unique code for each tagged individual
+- `snr`: Signal-to-noise ratio (SNR) recorded by *Thelma Biotel* receivers.
+
+For convenience, each individual has data corresponding to a single deployment, except *Raja undulata* (`fish_id = RAJUND-516`), which includes detections from **simultaneous deployments** of multiple receivers in a positioning array.
+
+```{r deployments}
+table(fish_data$detection_data$fish_id, fish_data$detection_data$deployment_id)
+```
+
+
+# Application of the method to a single transmitter-deployment combination
+
+In this section, we demonstrate how to apply the TOA-based method to a single transmitter-deployment combination. As an example, we will analyse the data corresponding to a **common dolphinfish (*Coryphaena hippurus*)**. In this case, the receiver was installed beneath a floating Fishing Aggregating Device (FAD), where the fish was also released.
+
+
+## Extracting TOA values
+
+We start by sub-setting the dataset to select only detections from the chosen fish and deployment:
+
+```{r subset}
+# Select fish and deployment IDs and subset detection data
+fish <- "CORHIP-892"
+depl <- 42
+data <- fish_data$detection_data[fish_id == fish & deployment_id == depl]
+head(data)
+
+# Number of detections
+nrow(data)
+
+# Date range (for plots)
+date_range <- c(floor_date(min(data$date_time), "days") - 24*3600, 
+                ceiling_date(max(data$date_time), "days") + 24*3600)
+dates <- seq(date_range[1], date_range[2], "days")
+date_range
+```
+
+
+The first step is to extract the **fractional second component** from the detection timestamps using the `fractSec()` function.
+
+```{r fracSec, out.width="80%", fig.align="center"}
+# Extract fractional seconds
+data[, fs := fractSec(date_time)]
+
+# Plot fractional seconds against time
+plot(fs ~ date_time, data = data, pch = 16, col = "#0C3096", cex = 0.4, 
+     ann = FALSE, axes = FALSE)
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1, las = 1)
+title(xlab = "Date time", line = 2.6)
+title(ylab = "Seconds (0-1 constrained)", line = 2.8)
+box()
+```
+
+These values represent the time offset (in seconds) from the previous whole second at which each signal was detected. Several important features are immediately visible in the plot:
+
+1. **Clock drift:** The fractional seconds decrease over time, indicating a negative time drift.
+2. **Cyclic wrapping:** Since the values are constrained between 0 and 1, the drift “wraps around” when it reaches 0 (after September 24).
+3. **Variability:** Deviations from the drift curve are already evident. These deviations reflect the actual movement of the fish towards or away from the receiver.
+
+To obtain a continuous drift signal without discontinuities, we apply the `unwrapDrift()` function. This function calculates the predominant drift value from close detections and uses it to compute a correction factor (an integer multiple of the tag's granularity) that repositions each detection on a continuous timescale. The **granularity** value required by `unwrapDrift()` is provided in tag metadata.
+
+```{r unwrap, out.width="80%", fig.align="center"}
+# Select the granularity of the transmitter from tag metadata
+indx_id <- fish_data$tag_metadata$fish_id == fish
+gran <- fish_data$tag_metadata$granularity[indx_id]
+gran # Granularity of 1 s
+
+# Unwrap the drift
+data[, drift := unwrapDrift(fs, date_time, gran)]
+
+# Plot unwrapped drift against time
+plot(drift ~ date_time, data = data,  pch = 16, col = "#0C3096", cex = 0.4, 
+     axes = FALSE, xlab = "Date time", ylab = "Seconds")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1)
+box()
+```
+
+
+We now have a **continuous drift signal**, which we can **detrend** to extract the TOA component. Detrending is done by fitting a **cubic smoothing spline** (`smooth.spline()` function of Base `R`) that captures the gradual, long-term clock drift. The **residuals** from this spline, the TOA values, represent the higher-frequency variability associated with changes in signal travel times.
+ 
+The spline's **degrees of freedom (**`df`**)** are set to **half the number of unique days** in the detection period. In our case, this choice balances the need to remove long-term drift variability while preserving short-term fluctuations caused by fish movements. While the choice of `df` can influence the **absolute values** of TOAs and derived distances, it has a **minimal impact on relative movement metrics** such as step lengths, and therefore, does not substantially affect behavioural state classification using HMMs. In **Section 4**, we examine how different values of `df` affect TOAs and the resulting movement metrics. We recommend experimenting with multiple `df` settings to ensure an appropriate fit for the temporal structure of each dataset.
+
+```{r spline, out.width="80%", fig.align="center"}
+# Set degrees of freedom based on the number of days with detections
+df <- ceiling(length(unique(as.Date(data$date_time)))/2)
+df # 7 degrees of freedom
+
+# Fit cubic smoothing spline
+spl <- smooth.spline(data$date_time, data$drift, df = df)
+
+# Plot spline over unwrapped drift
+plot(drift ~ date_time, data = data,  pch = 16, col = "#0C3096", cex = 0.4, 
+     axes = FALSE, xlab = "Date time", ylab = "Seconds")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1)
+lines(spl, col = "#FC3508", lwd = 3)
+legend("topright", legend = paste0("Spline (df=", df, ")"), lwd = 3, 
+       col = "#FC3508", bty = "n")
+box()
+
+# Compute TOAs as residuals from the spline
+data[, toa := resid(spl)]
+
+# Plot TOA values against time
+plot(toa ~ date_time, data = data, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Date time", ylab = "TOA (seconds)")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1)
+box()
+```
+
+
+These TOA values represent the relative signal travel times between the transmitter and the receiver. Larger TOA values correspond to greater distances, and shorter values indicate proximity to the receiver.
+
+
+## Estimating relative distances and step lengths
+
+The TOA values obtained in the previous step can be translated into more intuitive **relative distances** by multiplying them by the **speed of sound in water**.
+
+To calculate sound speed, we use the `soundSpeed()` function, which implements the **MacKenzie equation**. This widely used empirical formula incorporates **temperature**, **salinity**, and **depth** to estimate the speed of sound in seawater.
+
+In this example, we use ***in situ* temperature data** recorded by the receiver during the deployment. Temperature is logged at **10-minute intervals**, so we assign each detection the temperature recorded in the corresponding 10-minute block. For salinity, we assume a constant value of **37 PSU**, which is representative of the typical salinity in the **Balearic Sea**, where tagging and tracking occurred. We fix the depth to 5 meters, corresponding to the depth at which the receiver was deployed in this study.
+
+```{r dist, out.width="80%", fig.align="center"}
+# Extract temperature log for the receiver
+sensor <- fish_data$sensor_data[deployment_id == unique(data$deployment_id)]
+
+# Assign temperature data to each detection by matching to 10-minute intervals
+indx <- match(floor_date(data$date_time, "10min"), sensor$date_time)
+data$temperature_receiver <- sensor$temperature[indx]
+
+# Calculate the speed of sound at each detection
+data[, sound_speed := soundSpeed(temperature_receiver, sal = 37, depth = 5)]
+
+# Estimate relative distances (TOA*sound speed), then offset to 0 by subtracting
+# the minimum value
+data[, dist := toa * sound_speed]
+data[, dist := dist - min(dist, na.rm = TRUE)]
+
+# Maximum estimated distance from the receiver
+max(data$dist) # ~280 m
+
+# Plot distance values against time
+plot(dist ~ date_time, data = data, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Date time", ylab = "Distance to receiver (m)")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1)
+box()
+```
+
+
+The distance profile shows a **clear diel pattern**, with most detections at night occurring at shorter distances from the receiver (near the FAD). In contrast, daytime detections are more dispersed, indicating wider-ranging movements.
+
+To further validate these estimations, we can examine the relationship between signal-to-noise ratio (SNR) and estimated distances. Although SNR is highly influenced by background noise, which is highly variable, we expect more distant signals to have lower SNR.
+
+```{r snr, out.width="80%", fig.align="center"}
+# Plot SNR vs estimated distance to the receiver
+plot(snr ~ dist, data = data, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Distance to receiver (m)", ylab = "SNR")
+axis(1, lwd = 0, lwd.ticks = 1)
+axis(2, lwd = 0, lwd.ticks = 1)
+box()
+```
+
+
+From the distance time series, we can now calculate **step lengths**, defined as the differences between distances of consecutive detections.
+
+```{r step, out.width="80%", fig.align="center"}
+# Calculate step lengths (differences between consecutive distances)
+data[, step := c(NA, diff(dist))]
+
+# Plot step lengths over time
+plot(step ~ date_time, data = data, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Date time", ylab = c("Step length (m)"))
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1, las = 1)
+title(xlab = "Date time", line = 3)
+title(ylab = "Step length (m)", line = 3)
+box()
+```
+
+
+Positive step lengths indicate movement **away** from the receiver, while negative values indicate movement **toward** it. For most behavioural analysis, step lengths are modelled as **absolute values**, reflecting the magnitude of movement regardless of direction.
+
+```{r abs_step, out.width="80%", fig.align="center"}
+# Plot absolute step lengths against time
+plot(abs(step) ~ date_time, data = data, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Date time", ylab = "Absloute step length (m)")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1)
+box()
+```
+
+
+Consistent with distance estimates, **larger step lengths are observed during daytime**, suggesting higher levels of activity. 
+
+
+## Modelling activity using Hidden Markov Models (HMMs)
+
+To classify movement data into underlying behavioural states, we apply a **Hidden Markov Model (HMM)** using the `momentuHMM` package for R. HMMs are particularly well-suited for identifying latent states, such as **resting** and **active**, based on observed metrics like **step lengths**.
+
+A key requirement of HMMs is that observations happen at **regular time intervals**, whereas acoustic detections typically occur at **irregular intervals** due to random signal transmission times. To address this, we can regularise the time series by aggregating detections into fixed time bins, and then compute step lengths between the average distances within those bins. In this example, we use **5-minute intervals**, which align well with the range of transmission intervals of the used tag (90 to 150 seconds). However, the optimal interval length may vary depending on factors such as detection density, signal emission rates, and the temporal resolution needed to capture relevant movement behaviours.
+
+
+```{r step_bin, out.width="80%", fig.align="center"}
+# Aggregate detections into 5-minute intervals and calculate mean distances
+data[, time_int := floor_date(date_time, "5min")]
+data_t <- data[, .(n = length(tag_id), dist = mean(dist, na.rm = TRUE)),
+               by = list(date_time = time_int)]
+
+# Estimate step lengths between consecutive time intervals
+data_t[, step := c(NA, abs(diff(dist)))]
+
+# Plot step lengths in 5-minute intervals
+plot(step ~ date_time, data = data_t, pch = 16, col = "#0C3096", cex = 0.4,
+     axes = FALSE, xlab = "Date time", ylab = "Step length (m)")
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1, las = 1)
+box()
+```
+
+
+To account for the  **diel pattern** visible in the data, with larger step lengths during the day, we include **day vs. night** as a covariate in the HMM. We determine the day/night phase for each observation based on sunrise and sunset times at the tracking location, using the `suncalc` package.
+
+```{r sun}
+library(suncalc)
+
+# Deployment coordinates
+coord <- fish_data$deployment_metadata[deployment_id == depl,
+                                       c(longitude, latitude)]
+
+# Get sunrise/sunset times for each day at deployment coordinates
+sun <- getSunlightTimes(as.Date(dates), lat = coord[1], lon = coord[2], 
+                        keep = c("sunrise", "sunset"))
+head(sun)
+
+# Assign day/night labels to each time interval
+indx_dn <- match(as.Date(data_t$date_time), sun$date)
+data_t$daynight <- ifelse(data_t$date_time >= sun$sunrise[indx_dn] &
+                            data_t$date_time <= sun$sunset[indx_dn],
+                          "day", "night")
+data_t$daynight <- factor(data_t$daynight, levels = c("day", "night"))
+```
+
+
+We now fit a **two-state HMM** to the 5-minute interval step lengths, with states interpreted as "Resting" and "Active". The model uses a **gamma distribution for step lengths**, and the day/night phase is included as a covariate on the transition probabilities.
+
+We begin by preparing the data and selecting starting values for the gamma parameters based on the step length distribution.
+
+```{r prep_data, out.width="80%", fig_height = 6, fig.align="center", message=FALSE, warning=FALSE}
+library(momentuHMM)
+
+# Prepare data for momentuHMM
+data_hmm <- prepData(data_t, coordNames = NULL, covNames = "step")
+
+# Visualise distribution of step lengths
+hist(data_hmm$step, breaks = 500, col = "gray40", border = "transparent",
+     xlab = "Step length (m)", main = "")
+box()
+
+# Define model parameters
+states <- c("Resting", "Active") # Name of the states
+state_col <-  c(Resting = "#04AA96", Active = "#EA9D03") # Colors for plots
+distrib <- list(step = "gamma") # Parameter distribution
+par0 <- list(step = c(2, 20,  # Initial parameters for mean step lengths
+                      2, 20)) # Initial parameters for standard deviations
+
+# Show starting values in the histogram
+abline(v = par0$step[c(1, 2)], col =  state_col, lwd = 2)
+legend("topright", legend = names(state_col), lwd = 2, col = state_col, 
+       inset = c(0.05, 0.05), title = "Starting values")
+
+# Fit the HMM with day/night as a covariate on transition probabilities
+hmm_dn <- fitHMM(data = data_hmm, nbStates = length(states), 
+                 stateNames = states, dist = distrib, Par0 = par0, 
+                 formula = ~daynight)
+
+# Display and plot results
+hmm_dn
+
+plot(hmm_dn, breaks = 100, ask = FALSE)
+```
+
+
+The fitted HMM successfully identified the two behavioural states (Resting and Active). Step lengths were lower in the Resting state (mean = 3.2 m, sd = 3.3) and higher in the Active state (mean = 19.1 m, sd = 16.7). Transition probabilities exhibited a strong diel pattern, with the fish being more likely to remain active during the day and to switch to or remain resting at night.
+
+We now extract the **most probable behavioural state** at each time point using the **Viterbi algorithm**, and plot the results alongside the original movement data. To aid interpretation, we overlay day/night cycles as shaded regions and use colour to represent behavioural states.
+
+```{r plot_states, fig.width = 10, fig.height = 6, out.width="100%", fig.align="center"}
+# Decode most probable state sequence
+data_t$state <- viterbi(hmm_dn)
+
+# Function to shade nighttime periods in plots using sunrise/sunset data
+plotSun <- function(sun, night_col = "#D3DAE2") {
+  usr <- par("usr")
+  rect(xleft = sun$sunset[-nrow(sun)], xright = sun$sunrise[-1], 
+       ybottom = usr[3], ytop = usr[4], col = night_col, border = "transparent")
+}
+
+par(mfrow = c(2, 1), mar = c(0, 4.5, 0.5, 1.1), oma = c(4.1, 0, 0, 0))
+
+# Plot distance over time
+plot(dist ~ date_time, data = data_t, type = "n", axes = FALSE, ann = FALSE)
+plotSun(sun)
+lines(dist ~ date_time, data = data_t, col = "#01415B", lwd = 1)
+points(dist ~ date_time, data = data_t, cex = 0.5, pch = 16, 
+       col = state_col[state])
+axis(2, lwd = 0, lwd.ticks = 1, las = 1)
+title(ylab = "Distance to receiver (m)", line = 3.1)
+legend("topright", legend = names(state_col), pch = 16, col = state_col, 
+       inset = c(0.06, 0.05), cex = 0.8, bg = "white")
+box()
+
+# Plot step lengths over time
+plot(step ~ date_time, data = data_t, type = "n", axes = FALSE, ann = FALSE)
+plotSun(sun)
+lines(step ~ date_time, data = data_t, col = "#01415B", lwd = 1)
+points(step ~ date_time, data = data_t, cex = 0.5, pch = 16, 
+       col = state_col[state])
+axis(1, at = dates, lwd = 0, lwd.ticks = 1, labels = format(dates, "%b-%d"))
+axis(2, lwd = 0, lwd.ticks = 1, las = 1)
+title(ylab = "Step length (m)", line = 3.1)
+legend("topright", legend = names(state_col), pch = 16, col = state_col, 
+       inset = c(0.06, 0.05), cex = 0.8, bg = "white")
+box()
+```
+
+
+The resulting plots provide a clear visual representation of behavioural states over time, aligned with diel cycles. As expected, periods of high activity generally correspond with daytime, while resting states dominate at night, likely reflecting sheltering behaviour near the FAD.
+
+
+# Automating TOA extraction
+
+The TOA extraction process can be **automated** to handle multiple transmitter-deployment combinations efficiently across large acoustic telemetry datasets. Below, we demonstrate how to streamline the process using `data.table` operations, although equivalent implementations using `for` loops or `lapply()` are also possible.
+
+```{r multiple_toa}
+# Select the entire detection dataset
+detect <- fish_data$detection_data
+
+# Extract fractional seconds
+detect[, fs := fractSec(date_time)]
+
+# Assign the tag granularity value to each detection to facilitate group-wise 
+# operations in the next step
+indx_g <- match(detect$fish_id, fish_data$tag_metadata$fish_id)
+detect$gran <- fish_data$tag_metadata$granularity[indx_g]
+
+# Apply the unwrapping function separately for each fish_id and deployment_id
+detect[, drift := unwrapDrift(fs, date_time, unique(gran)),
+       by = list(fish_id, deployment_id)]
+
+# Helper function to extract TOAs by fitting a smoothing spline to the drift 
+# signal. The spline's degrees of freedom (df) can be manually set, or 
+# automatically estimated as a fraction (f) of the number of unique detection 
+# days (this functionality has been added to test the effect of different df 
+# values in the next section)
+extractTOA <- function(drift, time.stamps, df = NULL, f = 0.5) {
+  if (is.null(df)) df <- ceiling(length(unique(as.Date(time.stamps)))*f)
+  spl <- smooth.spline(time.stamps, drift, df = df)
+  resid <- drift - predict(spl, x = as.numeric(time.stamps))$y
+  return(resid)
+}
+
+# Estimate TOAs for each fish_id and deployment_id combination. The df is set to
+# half the number of unique detection days (f = 0.5).
+detect[, toa1 := extractTOA(drift, date_time, df = NULL, f = 0.5),
+       by = list(fish_id, deployment_id)]
+```
+
+
+To visually validate the results, we can inspect the **fractional seconds**, **unwrapped drift**, and **TOA values** for a few example individuals. For clarity, we will only plot the first three days of data.
+
+```{r plot_multi, fig.width = 10, fig.height = 10, out.width = "100%", fig.align = "center"}
+# Select three individuals
+id_list <- c("CONTAG-106", "CORHIP-892", "EPIMAR-5018", "GYMALT-5044")
+
+# Plot the first three days of data for each individual
+par(mfrow = c(4, 3), mar = c(4.1, 4.1, 1, 2), oma = c(0, 3, 3, 0))
+for (id in id_list) {
+  det_sub <- detect[fish_id == id][date_time < date_time[1] + 3*24*3600]
+  plot(fs ~ date_time, data = det_sub, pch = 16, col = "#0C3096", cex = 0.4,
+       xlab = "", ylab = "Seconds")
+  plot(drift ~ date_time, data = det_sub, pch = 16, col = "#0C3096", cex = 0.4,
+       xlab = "", ylab = "Seconds")
+  plot(toa1 ~ date_time, data = det_sub, pch = 16, col = "#0C3096", cex = 0.4,
+       xlab = "", ylab = "TOA (seconds)")
+}
+mtext(c("Fractional seconds (0-1 constrained)", "Unwrapped drift",
+        "TOA"), side = 3, outer = T, at = c(0.17, 0.50, 0.85), font = 2)
+mtext(id_list, side = 2, outer = T, at = c(0.90, 0.65, 0.4, 0.15), font = 2,
+      padj = -1)
+```
+
+
+Note the variation in drift magnitude across different transmitter-receiver combinations. The tags of `EPIMAR-5018` and `GYMALT-5044` show a clear dual-band pattern in the constrained fractional seconds due to their 0.5-second granularity (both are Lotek transmitters). The control tag `CONTAG-106` exhibits a very narrow TOA range, reflecting minimal spatial movement, despite a residual temporal drift pattern that can still be observed in TOAs.
+
+
+# Evaluating spline degrees of freedom for drift detrending
+
+Accurately estimating relative distances between the transmitter and the receiver requires a proper detrending of the unwrapped drift signal. When applying a smoothing spline to this end, the choice of degrees of freedom (df) is critical. **Low df values** may **underfit** the drift, failing to capture gradual drift variations and inflating TOA-derived distance. **High df values**, in contrast, may **overfit** short-term fluctuations, thereby flattening movement-related variations and introducing artefacts.
+
+Usually, clock drifts are approximately linear over short periods, but slow variations occur across longer deployments. Therefore, a flexible yet consistent approach was to define `df` proportionately to the tracking duration. We found that using a number equal to half the days with detections provides a good trade-off between capturing gradual trends and avoiding overfitting.
+
+In this section, we will test four degrees of freedom settings and their impact when estimating movement parameters. We will compare our recommended approximation (df = 0.5 x number of days) with the other three assignations: df = 2 (assuming near linear drift), df = 2 x number of days, and df = 10 x number of days. 
+
+```{r df_test, fig.width = 8, fig.height = 12, out.width="100%", fig.align="center"}
+# Add temperature values from sensor data to each detection
+indx_t <- match(paste0(floor_date(detect$date_time, "10min"), 
+                       detect$deployment_id),
+                paste0(fish_data$sensor_data$date_time, 
+                       fish_data$sensor_data$deployment_id))
+detect[, temperature_receiver := fish_data$sensor_data$temperature[indx_t]]
+
+# Add salinity and depth information from deployment metadata
+indx_d <- match(detect$deployment_id, 
+                fish_data$deployment_metadata$deployment_id)
+detect[, salinity := fish_data$deployment_metadata$salinity_psu[indx_d]]
+detect[, depth := fish_data$deployment_metadata$depth[indx_d]]
+
+# Estimate sound speed for each detection
+detect[, sound_speed := soundSpeed(temperature_receiver, salinity, depth)]
+
+# Detrend using different spline df settings and compute TOA-based distances ---
+
+# Recommended: df = 0.5 x detection days (from the previous section)
+detect[, dist1 := toa1 * sound_speed]
+detect[, step1 := c(diff(dist1), NA), by = list(fish_id, deployment_id)]
+
+# Linear approach: df = 2
+detect[, toa2 := extractTOA(drift, date_time, df = 2),
+       by = list(fish_id, deployment_id)]
+detect[, dist2 := toa2 * sound_speed]
+detect[, step2 := c(diff(dist2), NA), by = list(fish_id, deployment_id)]
+
+# Flexible fit: df = 2 x detection days
+detect[, toa3 := extractTOA(drift, date_time, f = 2),
+       by = list(fish_id, deployment_id)]
+detect[, dist3 := toa3 * sound_speed]
+detect[, step3 := c(diff(dist3), NA), by = list(fish_id, deployment_id)]
+
+# Very flexible fit: df = 10 x detection days
+detect[, toa4 := extractTOA(drift, date_time, f = 10),
+       by = list(fish_id, deployment_id)]
+detect[, dist4 := toa4 * sound_speed]
+detect[, step4 := c(diff(dist4), NA), by = list(fish_id, deployment_id)]
+
+# Visual comparison of distance and step lengths for different df values
+par(mfrow = c(4, 2), mar = c(4.8, 4.8, 1.8, 1), oma = c(0, 0, 3.5, 0))
+
+for (id in id_list) {
+  det_sub <- detect[fish_id == id]
+  n_days <- length(unique(as.Date(det_sub$date_time)))
+  
+  ylim_dist <- range(c(det_sub$dist1, det_sub$dist2, det_sub$dist3, 
+                       det_sub$dist4), na.rm = T)
+  ylim_step <- range(c(det_sub$step1, det_sub$step2, det_sub$step3,
+                       det_sub$dist4), na.rm = T)
+  
+  df_val <- c(2, ceiling(n_days*0.5), ceiling(n_days*2), ceiling(n_days*10))
+  df_id <- c(2, 1, 3, 4)
+  
+  for (i in seq_along(df_val)) {
+    plot(formula(paste0("dist", df_id[i], " ~ date_time")), data = det_sub, 
+         pch = 16, col = "#0C3096", cex = 0.4, xlab = "", 
+         ylab = "Distance to receiver (m)", ylim = ylim_dist)
+    title(paste("n days =", n_days, "  ", "df =", df_val[i]), font.main = 1, 
+          adj = 1)
+  
+    plot(formula(paste0("step", df_id[i], " ~ date_time")), data = det_sub, 
+         pch = 16, col = "#0C3096", cex = 0.4, xlab = "", 
+         ylab = "Step length (m)", ylim = ylim_step)
+    title(paste("n days =", n_days, "  ", "df =", df_val[i]), font.main = 1, 
+          adj = 1)
+  }
+  
+  title(main = id, outer = TRUE)    
+}
+```
+
+These plots demonstrate the impact of spline flexibility on TOA-based distance estimation. With low degrees of freedom (df = 2), long-term drift trends are not adequately captured, resulting in inflated and erratic distance estimates for several individuals (e.g., `CONTAG-106`, `CORHIP-892`, `EPIMAR-5018`).
+
+In contrast, very high df values (e.g., df = 2 × detection days and 10 × detection days) introduce overfitting, which can suppress biologically meaningful patterns or create artificial curved patterns in individuals switching between different distances (e.g., `CORHIP-892`, `GYMALT-5044`). These effects obscure low-activity periods and complicate ecological interpretation.
+
+Despite noticeable differences in distance patterns, **step lengths**, which reflect immediate movements between detections, remain relatively consistent across all df settings. This supports the robustness of step length as a behavioural proxy and confirms that **overfitting or underfitting the drift minimally affects the identification of behavioural types**.
+
+```{r df_test_2, fig.width = 8, fig.height = 3, out.width="100%", fig.align="center"}
+# Compare step lengths across df settings to test consistency of movement 
+# estimation
+par(mfrow = c(1, 3), mar = c(4.8, 4.8, 1, 1), oma = c(0, 0, 0, 0))
+
+df_lab <- c(2, "Detect. days x 2", "Detect. days x 10")
+df_id <- c(2, 3, 4)
+
+for (i in seq_along(df_lab)) {
+  plot(formula(paste0("step", df_id[i], "~ step1")), data = detect, 
+       col = adjustcolor("#0C3096", 0.6), pch = 16,
+       xlab ="Step lengths (m); df = Detect. days / 2",
+       ylab = paste("Step lengths (m); df =", df_lab[i]))
+  abline(0, 1, col = "red", lwd = 2)
+}
+```
+

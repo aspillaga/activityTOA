@@ -1,0 +1,19 @@
+Package: activityTOA
+Title: TOA-based Activity Estimation from Acoustic Telemetry Data
+Version: 1.0
+Description: Provides tools to extract the Time-of-arrival (TOA) of acoustic
+    signals from single-receiver acoustic telemetry setups, enabling estimation
+    of movement parameters and behavioural state classification.
+License: use_mit_license()
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends: 
+    R (>= 3.5),
+    lubridate,
+    data.table
+LazyData: true
+Suggests: 
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
