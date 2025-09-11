@@ -1,5 +1,6 @@
 ---
 title: "Guide to the TOA-based activity estimation method"
+author: "Eneko Aspillaga"
 date: "July 22, 2025"
 output: 
   html_vignette:
@@ -8,6 +9,9 @@ output:
     number_sections: true
     fig_width: 8
     fig_height: 6.3
+  pdf_document:
+    number_sections: true
+    toc: yes
 fontsize: 11pt
 vignette: >
   %\VignetteIndexEntry{Guide to the TOA-based activity estimation method}
@@ -51,7 +55,7 @@ The package can be directly installed from GitHub using the `devtools` package:
 
 ```{r install, eval=FALSE}
 # Install from GitHub
-# devtools::install_github("aspillaga/activityTOA", build_vignettes = TRUE) 
+devtools::install_github("aspillaga/activityTOA", build_vignettes = TRUE) 
 ```
 
 
